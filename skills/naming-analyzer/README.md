@@ -1,220 +1,143 @@
-# Naming Analyzer Skill
+# Naming Analyzer
 
-A skill for Claude Code that analyzes code naming conventions and suggests better variable, function, class, and other identifier names based on context and industry standards.
+An agent skill that reviews identifier names and proposes better ones. It
+pairs a deterministic, dependency-free scanner with the agent's reading of
+the code, so convention checks are exhaustive and cheap while the judgement
+calls — "this `getUser` writes to the database" — are made by something that
+actually read the function.
 
-## Purpose
+## What it checks
 
-Good naming is one of the most important aspects of readable, maintainable code. This skill helps developers:
+| Layer | Checks |
+|---|---|
+| **Scanner** (`scripts/naming-scan.py`) | Case style per language and kind · single letters · vague words · numbered suffixes · Hungarian notation · boolean form · negated booleans · Go initialisms and package stutter · Rust acronym casing · builtin shadowing · length · unclear abbreviations · exception suffixes · file names |
+| **Agent** (SKILL.md workflow) | Misleading names (critical) · one concept with many verbs · missing units · wrong plurality · stale names after refactors · project conventions overriding defaults · safe rename plans |
 
-- **Identify naming issues** in existing code before they become technical debt
-- **Improve code clarity** by replacing vague or misleading names with descriptive ones
-- **Enforce consistency** across a codebase by following language-specific conventions
-- **Reduce cognitive load** for anyone reading or maintaining the code
+Languages: Python (full `ast`), Go, Rust, JavaScript, TypeScript, Java,
+POSIX sh / Bash. SQL, REST, GraphQL, env vars, CLI flags, IaC and file
+naming are covered by a review reference.
 
-Poor naming leads to bugs, confusion, and wasted time. This skill acts as an expert code reviewer focused specifically on naming quality.
+## Install
 
-## When to Use
+**Claude Code**
 
-Use this skill when you want to:
-
-- Review naming conventions in a file, directory, or entire codebase
-- Get suggestions for better variable, function, or class names
-- Check if code follows language-specific naming conventions
-- Identify misleading names that don't match their actual behavior
-- Clean up unclear abbreviations or single-letter variables
-- Standardize boolean naming with proper prefixes
-
-**Trigger phrases:**
-
-- "Analyze the naming in this file"
-- "Suggest better names for my variables"
-- "Check naming conventions in src/"
-- "Review this code for naming issues"
-- "Help me rename these functions"
-
-## How It Works
-
-1. **Analysis Phase**: The skill examines all identifiers in the target code:
-   - Variables and constants
-   - Functions and methods
-   - Classes, interfaces, and types
-   - Files and directories
-   - Database tables and columns
-   - API endpoints
-
-2. **Issue Detection**: Each identifier is evaluated for common problems:
-   - Unclear or vague names (`data`, `info`, `temp`, `x`)
-   - Abbreviations that obscure meaning (`usrCfg`, `calcTtl`)
-   - Inconsistent naming conventions (mixing `camelCase` and `snake_case`)
-   - Misleading names (function called `getUser` that also updates data)
-   - Names that are too short or too long
-   - Single-letter variables outside of loop contexts
-   - Missing boolean prefixes (`active` instead of `isActive`)
-
-3. **Convention Checking**: The skill validates against language-specific standards:
-   - JavaScript/TypeScript: camelCase for variables/functions, PascalCase for classes
-   - Python: snake_case for variables/functions, PascalCase for classes
-   - Java: camelCase for variables/methods, PascalCase for classes
-   - Go: PascalCase for exported, camelCase for unexported
-
-4. **Report Generation**: A structured report is produced with:
-   - Summary statistics (items analyzed, issues found by severity)
-   - Critical issues (misleading names that could cause bugs)
-   - Major issues (unclear or vague names)
-   - Minor issues (convention violations)
-   - Specific suggestions with reasoning for each
-
-## Key Features
-
-### Multi-Language Support
-
-Understands naming conventions for JavaScript, TypeScript, Python, Java, Go, and more. Automatically adapts recommendations to the language being analyzed.
-
-### Severity Classification
-
-Issues are categorized by impact:
-
-| Severity | Description | Example |
-|----------|-------------|---------|
-| **Critical** | Misleading names that could cause bugs | `getUser()` that also modifies data |
-| **Major** | Unclear names requiring mental effort to understand | `proc(data)` instead of `processApiResponse(response)` |
-| **Minor** | Convention violations that affect consistency | `API_url` instead of `API_URL` |
-
-### Boolean Naming Guidance
-
-Enforces clear boolean prefixes:
-
-- `is` for state: `isActive`, `isVisible`, `isEnabled`
-- `has` for possession: `hasPermission`, `hasError`, `hasChildren`
-- `can` for ability: `canEdit`, `canDelete`, `canAccess`
-- `should` for decisions: `shouldRender`, `shouldValidate`, `shouldRefresh`
-
-### Magic Number Detection
-
-Identifies unnamed numeric literals and suggests meaningful constant names:
-
-```javascript
-// Before
-if (age > 18) { }
-setTimeout(callback, 3600000);
-
-// After
-const LEGAL_AGE = 18;
-const ONE_HOUR_IN_MS = 60 * 60 * 1000;
-
-if (age > LEGAL_AGE) { }
-setTimeout(callback, ONE_HOUR_IN_MS);
+```bash
+cp -r skills/naming-analyzer ~/.claude/skills/
+# or, from this marketplace
+/plugin marketplace add thimslugga/agent-toolkit
+/plugin install naming-analyzer@agent-toolkit
 ```
 
-### Refactoring Support
+**claude.ai** — add the zipped skill folder as a custom skill, or add
+`SKILL.md` and `references/` to project knowledge. No network access is needed.
 
-Can generate refactoring scripts to apply naming changes across the codebase while maintaining git history.
+## Use
 
-## Usage Examples
+Ask in plain language:
 
-**Analyze a single file:**
-```
-@naming-analyzer UserService.js
-```
+- "Review the naming in `src/billing/`"
+- "What should I call this function?" (paste it)
+- "Check Go naming conventions in `./internal`"
+- "Rename the camelCase methods in `legacy/` to snake_case"
 
-**Analyze an entire directory:**
-```
-@naming-analyzer src/
-```
+The agent runs the scanner, filters it through project rules and context,
+reads the important code paths, and reports the few renames that matter
+most, then offers to apply them with a semantic rename tool (gopls,
+rust-analyzer, tsserver, rope).
 
-**Show naming conventions reference:**
-```
-@naming-analyzer --conventions
-```
+## Run the scanner yourself
 
-**Analyze and suggest fixes for all issues:**
-```
-@naming-analyzer --fix-all
-```
+Python 3.9+, standard library only.
 
-**General invocation:**
-```
-@naming-analyzer
-```
-Then provide the code or file path when prompted.
+```bash
+# JSON report (stdout); progress on stderr
+python3 skills/naming-analyzer/scripts/naming-scan.py src/
 
-## Output
+# Compiler-style text, only minor and above
+python3 skills/naming-analyzer/scripts/naming-scan.py src/ --format text --min-severity minor
 
-The skill produces a detailed markdown report containing:
+# CI gate: exit 1 on any major finding, ignoring migrations
+python3 skills/naming-analyzer/scripts/naming-scan.py . --fail-on major --exclude 'migrations/*'
 
-### Summary Section
+# Stdin needs a language
+git show HEAD:app/user.go | python3 skills/naming-analyzer/scripts/naming-scan.py - --lang go
 
-```
-## Summary
-- Items analyzed: 156
-- Issues found: 23
-- Critical: 5 (misleading names)
-- Major: 12 (unclear/vague)
-- Minor: 6 (convention violations)
+# Rule table
+python3 skills/naming-analyzer/scripts/naming-scan.py --list-rules
 ```
 
-### Issue Details
+Example text output:
 
-Each issue includes:
-- **Current**: The existing name
-- **Issue**: Description of the problem
-- **Severity**: Critical, Major, or Minor
-- **Suggestion**: The recommended replacement
-- **Reason**: Why the suggestion is better
-
-### Suggested Renaming
-
-Prioritized list of all recommended changes:
-- High Priority: Misleading or critical issues
-- Medium Priority: Clarity improvements
-- Low Priority: Convention fixes
-
-## Best Practices
-
-### Do
-
-- **Use full words over abbreviations** - `userConfig` not `usrCfg`
-- **Be specific and descriptive** - `emailAddress` not `str`
-- **Follow language conventions** - camelCase in JavaScript, snake_case in Python
-- **Use consistent patterns** - don't mix styles within a file
-- **Make booleans obvious** - `isEnabled`, `hasPermission`
-- **Include units in constants** - `TIMEOUT_MS`, `MAX_SIZE_MB`
-
-### Don't
-
-- **Use single letters** - except in loops (`i`, `j`, `k`)
-- **Use vague names** - avoid `data`, `info`, `temp`, `x`, `result`
-- **Mix naming conventions** - pick one and stick with it
-- **Use misleading names** - name should match behavior exactly
-- **Over-abbreviate** - `calculateTotal` not `calcTtl`
-- **Use Hungarian notation** - not needed in modern typed languages
-
-### Acceptable Abbreviations
-
-Some abbreviations are well-known and acceptable:
-- `html`, `api`, `url`, `id`, `db`, `io`, `ui`
-- `min`, `max`, `src`, `dest`, `config`, `env`
-- `req`, `res` (in HTTP context)
-- `err` (in error handling context)
-
-## Naming Decision Tree
-
-```
-Is it a boolean?
-├─ Yes → Use is/has/can/should prefix
-└─ No → Is it a function?
-    ├─ Yes → Use verb phrase (action)
-    └─ No → Is it a class?
-        ├─ Yes → Use noun (PascalCase)
-        └─ No → Is it a constant?
-            ├─ Yes → Use UPPER_SNAKE_CASE
-            └─ No → Use descriptive noun (camelCase/snake_case)
+```text
+app/user.py:1: minor N001 function 'getUser' Python function names use snake_case -> get_user (2 uses)
+app/user.py:6: minor N003 variable 'data' 'data' says nothing about the domain; name what it holds or does (2 uses)
+internal/user/service.go:3: minor N008 type 'UserId' Go initialisms keep a consistent case (ID, URL, HTTP, JSON) -> UserID (2 uses)
+internal/user/service.go:3: minor N009 type 'UserId' Callers write user.UserId; drop the repeated package name -> ID (2 uses)
+internal/user/service.go:5: minor N009 type 'UserService' Callers write user.UserService; drop the repeated package name -> Service (2 uses)
+-- 2 files, 10 identifiers, 5 findings (minor=5)
 ```
 
-## Notes
+Discovery honours `.gitignore` inside a git work tree and always skips
+`node_modules`, `vendor`, `target`, virtualenvs, generated files
+(`Code generated ... DO NOT EDIT.`, `@generated`), minified/bundled JS and
+`.d.ts` files.
 
-- **Context matters**: Loop counters can be `i`, `j` - not every short name is bad
-- **Consistency over perfection**: Being consistent within a project is more important than following every convention perfectly
-- **Refactor as understanding improves**: Names should evolve as you better understand the domain
-- **Use IDE refactoring tools**: When renaming, use your IDE's rename feature to safely update all references
-- **Well-known abbreviations are okay**: `html`, `api`, `url`, `id` are universally understood
+## Rules
+
+| ID | Rule | Severity |
+|---|---|---|
+| N001 | case-style | minor |
+| N002 | single-letter | major → info by scope and language |
+| N003 | vague-name | major → info by kind |
+| N004 | numbered-suffix | info |
+| N005 | hungarian | minor |
+| N006 | boolean-prefix | info |
+| N007 | negated-boolean | minor |
+| N008 | acronym-casing (Go, Rust) | minor |
+| N009 | package-stutter (Go) | minor |
+| N010 | shadows-builtin (Python, Go) | minor |
+| N011 | too-long | info |
+| N012 | unclear-abbreviation | minor |
+| N013 | exception-suffix (Python) | info |
+| N014 | file-name | minor (major for Java) |
+
+`critical` is never emitted by the scanner; it is reserved for misleading
+names the agent confirms. Full contract: [SPEC.md](SPEC.md).
+
+## Calibration
+
+Severities were tuned against idiomatic code: `net/http` and
+`encoding/json` from the Go standard library and `json`, `http`,
+`argparse` and `pathlib` from CPython. Each false positive found there is a
+regression test. At `--min-severity minor` the scanner reports roughly one
+finding per ~120 Go identifiers and one per ~20 Python identifiers in that
+code, and what remains are real deviations (legacy stdlib names such as
+`isReservedKey`) that the agent's context pass decides whether to keep.
+
+## Layout
+
+```text
+naming-analyzer/
+├── SKILL.md                 # agent workflow (loaded on demand)
+├── SPEC.md                  # scanner contract
+├── scripts/naming-scan.py   # the scanner (stdlib only)
+├── references/              # loaded per language as needed
+│   ├── python.md  go.md  rust.md  javascript-typescript.md  java.md  shell.md
+│   ├── data-and-apis.md     # SQL, REST, GraphQL, env, CLI, IaC, files
+│   ├── semantics.md         # judging and inventing names; misleading-name checklist
+│   └── report-format.md
+├── tests/                   # pytest suite, incl. stdlib regressions
+└── pyproject.toml           # ruff / mypy / pytest config (dev only)
+```
+
+## Develop
+
+Test-first: add a failing case to `tests/` (real-world false positives go in
+`tests/test_regressions.py`), then change the scanner.
+
+```bash
+cd skills/naming-analyzer
+uv run --with pytest --with pytest-cov pytest --cov=scripts
+uvx ruff check . && uvx ruff format --check .
+uvx mypy scripts/naming-scan.py
+```

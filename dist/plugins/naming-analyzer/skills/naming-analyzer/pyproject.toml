@@ -1,0 +1,26 @@
+# Dev tooling for the naming-analyzer scanner. The script itself is stdlib-only
+# and needs no install; this file only configures ruff, mypy and pytest.
+#   uvx ruff check . && uvx ruff format --check .
+#   uvx mypy scripts/naming-scan.py
+#   uv run --with pytest --with pytest-cov pytest
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "N", "PL"]
+ignore = ["SIM905", "PLR0917", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR2004", "PLW2901", "RUF001", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLC0415", "N802"]
+"scripts/naming-scan.py" = ["N999", "N802", "N815"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"

@@ -1,351 +1,178 @@
 ---
 name: naming-analyzer
-description: Suggest better variable, function, and class names based on context and conventions.
+description: Review and improve identifier names (variables, functions, types, constants, files, packages) in Python, Go, Rust, JavaScript/TypeScript, Java and shell by running a deterministic convention scanner, then judging misleading, vague and inconsistent names in context and proposing safe renames. Use when asked to "review naming", "suggest better names", "check naming conventions in src/", "what should I call this", "is this a good name", or to rename identifiers across a codebase.
 ---
 
-# Naming Analyzer Skill
+# Naming Analyzer
 
-Suggest better variable, function, and class names based on context and conventions.
+Finds names that break language conventions, carry no meaning, or lie about
+what the code does, and proposes better ones with a safe path to rename.
 
-## Instructions
+The work splits in two, and the split matters:
 
-You are a naming convention expert. When invoked:
+| Half | Who | Catches |
+|---|---|---|
+| Mechanical | `scripts/naming-scan.py` | Case style, single letters, vague words, numbered suffixes, Hungarian notation, boolean form, Go initialisms and stutter, Rust acronyms, builtin shadowing, length, abbreviations, exception suffixes, file names |
+| Semantic | You, by reading code | Names that mislead (critical), inconsistent vocabulary, missing units, wrong plurality, stale names after refactors |
 
-1. **Analyze Existing Names**:
-   - Variables, constants, functions, methods
-   - Classes, interfaces, types
-   - Files and directories
-   - Database tables and columns
-   - API endpoints
+The scanner never reports `critical`. Only you can, after reading the body.
 
-2. **Identify Issues**:
-   - Unclear or vague names
-   - Abbreviations that obscure meaning
-   - Inconsistent naming conventions
-   - Misleading names (name doesn't match behavior)
-   - Too short or too long names
-   - Hungarian notation misuse
-   - Single-letter variables outside loops
+## Modes
 
-3. **Check Conventions**:
-   - Language-specific conventions (camelCase, snake_case, PascalCase)
-   - Framework conventions (React components, Vue props)
-   - Project-specific patterns
-   - Industry standards
+Pick from the request; ask only if it is genuinely unclear.
 
-4. **Provide Suggestions**:
-   - Better alternative names
-   - Reasoning for each suggestion
-   - Consistency improvements
-   - Contextual appropriateness
+| Request | Mode |
+|---|---|
+| "review naming in X", a path, "check conventions" | **Review** (default) |
+| "what should I call this?", one identifier or snippet | **Name one thing**: skip the scanner, use [references/semantics.md](references/semantics.md) |
+| "what are the conventions for Go?" | **Reference**: answer from the language reference below |
+| "rename these", "fix all" | **Rename**: Review first, then the rename workflow |
 
-## Naming Conventions by Language
+## Review workflow
 
-### JavaScript/TypeScript
-- Variables/functions: `camelCase`
-- Classes/interfaces: `PascalCase`
-- Constants: `UPPER_SNAKE_CASE`
-- Private fields: `_prefixUnderscore` or `#privateField`
-- Boolean: `is`, `has`, `can`, `should` prefixes
+1. **Scope.** Resolve the target path. Note the languages present and read
+   the matching reference(s) — only those:
+   [python](references/python.md) · [go](references/go.md) ·
+   [rust](references/rust.md) · [javascript/typescript](references/javascript-typescript.md) ·
+   [java](references/java.md) · [shell](references/shell.md) ·
+   [data, APIs, files, config](references/data-and-apis.md).
 
-### Python
-- Variables/functions: `snake_case`
-- Classes: `PascalCase`
-- Constants: `UPPER_SNAKE_CASE`
-- Private: `_prefix_underscore`
-- Boolean: `is_`, `has_`, `can_` prefixes
+2. **Find project rules first.** They override language defaults. Look for:
+   `pyproject.toml`/`ruff.toml` (`N` = pep8-naming), `.golangci.yml`
+   (`revive` var-naming, `stylecheck` ST1003), `clippy.toml` / `#![warn(clippy::...)]`,
+   `.eslintrc*` / `eslint.config.*` (`camelcase`, `@typescript-eslint/naming-convention`),
+   `checkstyle.xml`, a glossary, `CONTRIBUTING.md`, or ADRs about naming.
 
-### Java
-- Variables/methods: `camelCase`
-- Classes/interfaces: `PascalCase`
-- Constants: `UPPER_SNAKE_CASE`
-- Packages: `lowercase`
+3. **Run the scanner** from the project root. Python 3.9+, stdlib only, no
+   install. Set `SKILL_DIR` to this skill's directory (the base directory
+   shown when the skill loads, e.g. `~/.claude/skills/naming-analyzer`):
 
-### Go
-- Exported: `PascalCase`
-- Unexported: `camelCase`
-- Acronyms: All caps (`HTTPServer`, not `HttpServer`)
+   ```bash
+   SCAN="python3 $SKILL_DIR/scripts/naming-scan.py"
+   $SCAN src/ --min-severity minor > /tmp/naming.json        # full report
+   $SCAN src/ --min-severity minor --format text | head -50  # skim
+   $SCAN --list-rules                                       # rule table
+   ```
 
-## Common Naming Issues
+   Read the JSON in pieces rather than dumping it (it can hold up to
+   `--max-findings`, default 1000):
 
-### Too Vague
-```javascript
-// ❌ Bad - Too generic
-function process(data) { }
-const info = getData();
-let temp = x;
+   ```bash
+   python3 -c 'import json; r=json.load(open("/tmp/naming.json")); print(json.dumps(r["summary"], indent=1)); [print(f["severity"], f["rule"], f["path"], f["line"], f["name"], "->", f["suggestion"], f["occurrences"]) for f in r["findings"][:40]]'
+   ```
 
-// ✓ Good - Specific and clear
-function processPayment(transaction) { }
-const userProfile = getUserProfile();
-let previousValue = x;
-```
+   Useful flags: `--exclude 'migrations/*'` (repeatable), `--lang` (force for
+   stdin `-` or explicit files), `--fail-on major` (CI gate, exit 1),
+   `--max-findings N`. A missing path exits 2. Inside a git repo it honours
+   `.gitignore`; it always skips `node_modules`, `vendor`, generated,
+   minified and `.d.ts` files. Start at `--min-severity minor` on large
+   codebases; drop to `info` for a single file.
 
-### Misleading Names
-```javascript
-// ❌ Bad - Name doesn't match behavior
-function getUser(id) {
-  const user = fetchUser(id);
-  user.lastLogin = Date.now();
-  saveUser(user); // Side effect! Not just "getting"
-  return user;
-}
+   **Unsupported languages** (C, C++, C#, Kotlin, Ruby, PHP, Swift...) are
+   skipped silently: `summary.languages` shows what was scanned. Say so in
+   the report and review those files by reading, using
+   [references/semantics.md](references/semantics.md) and the language's own
+   style guide.
 
-// ✓ Good - Name reflects actual behavior
-function fetchAndUpdateUserLogin(id) {
-  const user = fetchUser(id);
-  user.lastLogin = Date.now();
-  saveUser(user);
-  return user;
-}
-```
+4. **Read `summary.style_profile` before the findings.** It counts styles per
+   language and kind. If the project is consistently off-convention (say 95%
+   `snake_case` functions in a JS codebase), consistency wins: treat that as
+   the standard, drop the matching N001 findings, and mention it once.
 
-### Abbreviations
-```javascript
-// ❌ Bad - Unclear abbreviations
-const usrCfg = loadConfig();
-function calcTtl(arr) { }
+5. **Verify every finding you report.** The scanner is lexical. Open the line
+   for anything `major`, anything with many `occurrences`, and anything
+   public. Drop or downgrade when the name is:
+   - required by a framework or protocol (`setUp`, `ServeHTTP`, `do_GET`,
+     React `useX` hooks, Django `Meta`, ORM columns mirroring a schema,
+     JSON/GraphQL fields that mirror an external contract);
+   - public API where a rename breaks users (keep it; propose a deprecation alias);
+   - conventional in that domain (`i`, `j` loops; `x`, `y` coordinates;
+     `df` in pandas; `ctx`, `err`, `req`, `res`; `T` for a type parameter);
+   - a deliberate project choice found in step 2.
 
-// ✓ Good - Clear and readable
-const userConfig = loadConfig();
-function calculateTotal(amounts) { }
+6. **Semantic pass.** Read the public surface and the most-used names (high
+   `occurrences`), plus any function longer than ~40 lines. Check each against
+   the misleading-name checklist in [references/semantics.md](references/semantics.md):
+   `get*` that mutates, `is*` that returns a non-boolean or has side effects,
+   singular names for collections, durations and sizes without units, one
+   concept with several verbs (`fetch`/`get`/`load`), one name with two
+   meanings, names left behind by a refactor.
 
-// ✓ Acceptable - Well-known abbreviations
-const htmlElement = document.getElementById('main');
-const apiUrl = process.env.API_URL;
-```
+7. **Report** with [references/report-format.md](references/report-format.md).
+   Lead with the handful of renames that matter most, not the full list.
 
-### Boolean Naming
-```javascript
-// ❌ Bad - Unclear state
-const login = user.authenticated;
-const status = checkUser();
+## Severity model
 
-// ✓ Good - Clear boolean intent
-const isLoggedIn = user.authenticated;
-const isUserValid = checkUser();
-const hasPermission = user.roles.includes('admin');
-const canEditPost = isOwner || isAdmin;
-const shouldShowNotification = isEnabled && hasUnread;
-```
+| Severity | Meaning | Source |
+|---|---|---|
+| `critical` | Misleading: the name promises something the code does not do | Agent only |
+| `major` | Opaque at a public or wide scope: vague function/type names, single-letter functions or types | Scanner + agent |
+| `minor` | Convention violation or unclear local name; fix when touching the code | Scanner |
+| `info` | Taste, or idiomatic in context (Go short locals, numbered pairs, test files) | Scanner |
 
-### Magic Numbers
-```javascript
-// ❌ Bad - Unnamed constants
-if (age > 18) { }
-setTimeout(callback, 3600000);
+## Rename workflow
 
-// ✓ Good - Named constants
-const LEGAL_AGE = 18;
-const ONE_HOUR_IN_MS = 60 * 60 * 1000;
+Never rename without the user's go-ahead, and never with blind text
+replacement: identifiers collide with strings, comments, other scopes and
+other modules.
 
-if (age > LEGAL_AGE) { }
-setTimeout(callback, ONE_HOUR_IN_MS);
-```
+1. **Size it.** `occurrences` in the JSON counts whole-word uses of the
+   name across *all* scanned files and languages, so it overstates common
+   names (`data`, `id`). Treat it as an upper bound and confirm scope with
+   `rg -w --count-matches '<name>' <path>` or the LSP "find references".
+2. **Use the language's semantic rename** (scope-aware):
 
-## Usage Examples
+   | Language | Tool |
+   |---|---|
+   | Python | LSP rename (pyright/basedpyright, pylsp + rope); scripted: `rope` |
+   | Go | `gopls rename -w path/file.go:#<byte-offset> NewName` |
+   | Rust | rust-analyzer rename (LSP); check with `cargo check` |
+   | JS/TS | tsserver rename (LSP); scripted: `ts-morph` or `jscodeshift` |
+   | Java | IDE refactor, or OpenRewrite `ChangeMethodName` / `ChangeType` recipes |
+   | Shell | No semantic tool: `rg -w` the name, edit by hand, review `git diff` |
 
-```
-@naming-analyzer
-@naming-analyzer src/
-@naming-analyzer UserService.js
-@naming-analyzer --conventions
-@naming-analyzer --fix-all
-```
+3. **Protect public API.** Keep the old name as a deprecated alias for a
+   release: Python `old = new` plus `warnings.warn(..., DeprecationWarning)`;
+   Go a wrapper with a `// Deprecated: use New.` comment; Rust
+   `#[deprecated(note = "use new")]` plus `pub use`; TS a re-export with a
+   `/** @deprecated */` JSDoc tag.
+4. **Prove it.** Run the build, linter and tests; show `git diff --stat`.
+   Go: also check file renames against build-constraint suffixes
+   (`_linux.go`, `_test.go`, `_amd64.go` change what compiles).
 
-## Report Format
+## Present results to the user
 
 ```markdown
-# Naming Analysis Report
+## Naming review: <path> — <N> files, <M> identifiers
 
-## Summary
-- Items analyzed: 156
-- Issues found: 23
-- Critical: 5 (misleading names)
-- Major: 12 (unclear/vague)
-- Minor: 6 (convention violations)
+**Top renames** (highest impact first)
+1. `getUser` → `fetchAndTouchUser` — critical: also writes `lastLogin` (services/user.ts:45, 12 uses)
+2. `process` → `applyRefund` — major: says nothing (billing/refund.py:88, public)
 
----
+**Conventions**: 14 minor findings, mostly `snake_case` methods in `legacy/` — fix opportunistically.
+**Kept on purpose**: `ServeHTTP`, `setUp` (framework); `x, y` (coordinates).
 
-## Critical Issues (5)
-
-### src/services/UserService.js:45
-**Current**: `getUser(id)`
-**Issue**: Function name implies read-only but has side effects (updates lastLogin)
-**Severity**: Critical - Misleading
-**Suggestion**: `fetchAndUpdateUserLogin(id)`
-**Reason**: Name should reflect the mutation
-
-### src/utils/helpers.js:23
-**Current**: `validate(x)`
-**Issue**: Generic parameter name, unclear what's being validated
-**Severity**: Critical - Too vague
-**Suggestion**: `validateEmail(emailAddress)`
-**Reason**: Specific names improve clarity
-
----
-
-## Major Issues (12)
-
-### src/components/DataList.jsx:12
-**Current**: `const d = new Date()`
-**Issue**: Single-letter variable in large scope
-**Severity**: Major
-**Suggestion**: `const currentDate = new Date()`
-**Reason**: Clarity and searchability
-
-### src/api/client.js:67
-**Current**: `function proc(data) {}`
-**Issue**: Abbreviated function name
-**Severity**: Major
-**Suggestion**: `function processApiResponse(data) {}`
-**Reason**: Full words are more readable
-
-### src/models/User.js:34
-**Current**: `user.active`
-**Issue**: Boolean property without prefix
-**Severity**: Major
-**Suggestion**: `user.isActive`
-**Reason**: Follow boolean naming convention
-
-### src/utils/format.js:89
-**Current**: `const MAX = 100`
-**Issue**: Generic constant name
-**Severity**: Major
-**Suggestion**: `const MAX_RETRY_ATTEMPTS = 100`
-**Reason**: Specific purpose is clearer
-
----
-
-## Minor Issues (6)
-
-### src/config/settings.js:12
-**Current**: `const API_url = '...'`
-**Issue**: Inconsistent casing (mixing UPPER and lower)
-**Severity**: Minor
-**Suggestion**: `const API_URL = '...'` or `const apiUrl = '...'`
-**Reason**: Consistency in convention
-
-### src/helpers/string.js:45
-**Current**: `function strToNum(s) {}`
-**Issue**: Abbreviated function and parameter
-**Severity**: Minor
-**Suggestion**: `function stringToNumber(value) {}`
-**Reason**: Clarity over brevity
-
----
-
-## Convention Violations
-
-### Inconsistent Boolean Prefixes
-**Locations**: 8 files
-**Issue**: Mixed use of `is`, `has`, `can` vs no prefix
-**Recommendation**: Standardize on boolean prefixes
-- Use `is` for state: `isActive`, `isVisible`
-- Use `has` for possession: `hasPermission`, `hasError`
-- Use `can` for ability: `canEdit`, `canDelete`
-- Use `should` for decisions: `shouldRender`, `shouldValidate`
-
-### Mixed Naming Conventions
-**Location**: src/legacy/
-**Issue**: Mix of camelCase and snake_case in JavaScript
-**Recommendation**: Convert all to camelCase for consistency
-
----
-
-## Suggested Renaming
-
-### High Priority (Misleading or Critical)
-1. `getUser` → `fetchAndUpdateUserLogin` (src/services/UserService.js:45)
-2. `validate` → `validateEmail` (src/utils/helpers.js:23)
-3. `process` → `processPaymentTransaction` (src/payment/processor.js:67)
-
-### Medium Priority (Clarity)
-1. `d` → `currentDate` (7 locations)
-2. `temp` → `previousValue` (4 locations)
-3. `data` → `apiResponse` or more specific (12 locations)
-4. `arr` → `items`, `values`, or more specific (8 locations)
-
-### Low Priority (Convention)
-1. `active` → `isActive` (12 locations)
-2. `error` → `hasError` (6 locations)
-3. `API_url` → `API_URL` (3 locations)
-
----
-
-## Naming Patterns to Follow
-
-### Functions/Methods
-- Verbs: `get`, `set`, `create`, `update`, `delete`, `fetch`, `calculate`, `validate`
-- Clear action: `sendEmail()`, `parseJSON()`, `formatCurrency()`
-
-### Classes
-- Nouns: `UserService`, `PaymentProcessor`, `EmailValidator`
-- Avoid generic: Don't use `Manager`, `Helper`, `Utility` unless necessary
-
-### Variables
-- Nouns or noun phrases: `user`, `emailAddress`, `totalAmount`
-- Descriptive: `userList` not `list`, `activeUsers` not `users2`
-
-### Constants
-- All caps with underscores: `MAX_RETRY_ATTEMPTS`, `DEFAULT_TIMEOUT`
-- Include units: `CACHE_DURATION_MS`, `MAX_FILE_SIZE_MB`
-
-### Booleans
-- Question form: `isValid`, `hasPermission`, `canEdit`
-- Affirmative: `isEnabled` not `isDisabled` (prefer positive)
-
----
-
-## Refactoring Script
-
-Would you like me to create a refactoring script to apply these changes?
-This will:
-1. Rename all suggested items
-2. Update all references
-3. Maintain git history
-4. Generate migration guide
-
----
-
-## Best Practices
-
-✓ **DO**:
-- Use full words over abbreviations
-- Be specific and descriptive
-- Follow language conventions
-- Use consistent patterns
-- Make booleans obvious
-- Include units in constants
-
-✗ **DON'T**:
-- Use single letters (except in loops: i, j, k)
-- Use vague names (data, info, temp, x)
-- Mix naming conventions
-- Use misleading names
-- Over-abbreviate
-- Use Hungarian notation in modern code
+Want me to apply renames 1–2 with the TypeScript and Python language-server rename and run the tests?
 ```
 
-## Naming Decision Tree
+Keep the full list in a file or collapsible section when there are more than
+~15 findings; the user needs the decision, not the dump.
 
-```
-Is it a boolean?
-├─ Yes → Use is/has/can/should prefix
-└─ No → Is it a function?
-    ├─ Yes → Use verb phrase (action)
-    └─ No → Is it a class?
-        ├─ Yes → Use noun (PascalCase)
-        └─ No → Is it a constant?
-            ├─ Yes → Use UPPER_SNAKE_CASE
-            └─ No → Use descriptive noun (camelCase/snake_case)
-```
+## Troubleshooting
 
-## Notes
+| Symptom | Fix |
+|---|---|
+| `files_scanned: 0` | Extensions not recognised, or ignored by `.gitignore`; pass files explicitly with `--lang` |
+| Entries in `errors` with `SyntaxError` | File is not valid for the parser's Python version (3.9+ grammar on the running interpreter); review that file by hand |
+| Thousands of findings | `--min-severity minor`, `--exclude` generated or legacy dirs, then work package by package |
+| Finding is wrong | Lexical scanners miss context; drop it and, if it recurs, note the pattern in the report |
+| `python3` missing | Any Python 3.9+ works: `uv run --python 3.12 "$SKILL_DIR/scripts/naming-scan.py" <path>` |
+| `No such file or directory` for the script | `SKILL_DIR` is unset or wrong; use the absolute path of this skill's folder |
 
-- Prioritize clarity over brevity
-- Context matters (loop counters can be `i`, `j`)
-- Well-known abbreviations are okay (`html`, `api`, `url`, `id`)
-- Consistency within a project is more important than perfect naming
-- Refactor names as understanding improves
-- Use IDE rename refactoring to safely update all references
+## Files
+
+- `scripts/naming-scan.py` — the scanner (see `SPEC.md` for the contract).
+- `references/<language>.md` — conventions, idioms and linter rules per language.
+- `references/semantics.md` — how to judge and invent names; misleading-name checklist.
+- `references/report-format.md` — full report template.
+- `tests/` — scanner test suite (`uv run --with pytest pytest`).

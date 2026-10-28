@@ -51,3 +51,36 @@ jobs:
           fi
           echo "✓ dist/ is up to date"
 
+
+  naming-analyzer:
+    name: naming-analyzer scanner (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.13']
+    defaults:
+      run:
+        working-directory: skills/naming-analyzer
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Lint and format
+        if: matrix.python == '3.13'
+        run: |
+          uvx ruff check .
+          uvx ruff format --check .
+
+      - name: Type check
+        if: matrix.python == '3.13'
+        run: uv run --no-project --with mypy --with pytest mypy scripts/naming-scan.py tests
+
+      - name: Test with coverage
+        run: uv run --no-project --with pytest --with pytest-cov pytest --cov=scripts --cov-report=term-missing
+
+      - name: Dogfood on this repository
+        run: python scripts/naming-scan.py ../../scripts ../ --min-severity major --format text
