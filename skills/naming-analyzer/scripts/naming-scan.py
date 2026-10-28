@@ -87,22 +87,24 @@ EXTENSIONS = {
     ".bash": "shell",
     ".ksh": "shell",
 }
-SKIP_DIRS = {
-    ".git",
-    "node_modules",
-    "vendor",
-    "target",
-    "dist",
-    "build",
-    ".venv",
-    "venv",
-    "__pycache__",
-    ".tox",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".pytest_cache",
-    ".next",
-}
+SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "node_modules",
+        "vendor",
+        "target",
+        "dist",
+        "build",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".tox",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+        ".next",
+    }
+)
 MAX_FILE_BYTES = 1 << 20
 
 # --------------------------------------------------------------------------- #
@@ -194,6 +196,16 @@ def _is_initialism(word: str) -> bool:
     return upper in GO_INITIALISMS or re.sub(r"\d+$", "", upper) in GO_INITIALISMS
 
 
+def go_fix_initialisms(name: str) -> str:
+    """Upper-case only the words that are Go initialisms (``UserId`` -> ``UserID``); leave the rest."""
+    core = _core(name)
+    exported = core[:1].isupper()
+    return "".join(
+        w.upper() if _is_initialism(w) and w != w.upper() and (i > 0 or exported) else w
+        for i, w in enumerate(split_words(core))
+    )
+
+
 def go_name(name: str) -> str:
     """Render ``name`` as Go MixedCaps with initialisms upper-cased; keeps exportedness."""
     core = _core(name)
@@ -269,11 +281,56 @@ def _blank(chunk: str) -> str:
     return "".join("\n" if ch == "\n" else " " for ch in chunk)
 
 
+_RUST_RAW = re.compile(r'(?:br|r)(#*)"')
+_CHAR_LIT = re.compile(r"'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^\\'\n])'")
+_JS_REGEX_PREV = frozenset("(,=:[!&|?{};+-*%<>~^")
+_JS_REGEX_KEYWORDS = ("return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "yield", "await")
+
+
+def _js_regex_allowed(text: str, i: int) -> bool:
+    """A '/' starts a regex literal when it cannot be division (after an operator, keyword or line start)."""
+    j = i - 1
+    while j >= 0 and text[j] in " \t":
+        j -= 1
+    if j < 0 or text[j] == "\n":
+        return True
+    if text[j] in _JS_REGEX_PREV:
+        return True
+    k = j
+    while k >= 0 and (text[k].isalnum() or text[k] in "_$"):
+        k -= 1
+    return text[k + 1 : j + 1] in _JS_REGEX_KEYWORDS
+
+
+def _js_regex_end(text: str, i: int) -> int:
+    """Index just past a regex literal starting at ``text[i] == '/'``, or -1 if it is not one."""
+    j, n, in_class = i + 1, len(text), False
+    while j < n:
+        ch = text[j]
+        if ch == "\n":
+            return -1
+        if ch == "\\":
+            j += 2
+            continue
+        if ch == "[":
+            in_class = True
+        elif ch == "]":
+            in_class = False
+        elif ch == "/" and not in_class:
+            j += 1
+            while j < n and text[j].isalpha():
+                j += 1
+            return j
+        j += 1
+    return -1
+
+
 def strip_c_like(text: str, language: str) -> str:
-    """Blank comments and string contents for Go, Rust, JS/TS and Java."""
+    """Blank comments and string contents for Go, Rust, JS/TS and Java (newlines preserved)."""
     out: list[str] = []
     i, n = 0, len(text)
     backtick = language in ("go", "javascript", "typescript")
+    js = language in ("javascript", "typescript")
     while i < n:
         ch = text[i]
         nxt = text[i + 1] if i + 1 < n else ""
@@ -287,16 +344,22 @@ def strip_c_like(text: str, language: str) -> str:
             end = n if end == -1 else end + 2
             out.append(_blank(text[i:end]))
             i = end
+        elif ch == "/" and js and _js_regex_allowed(text, i) and (end := _js_regex_end(text, i)) != -1:
+            out.append("/" + " " * (end - i - 1))
+            i = end
+        elif language == "java" and text.startswith('"""', i):
+            end = text.find('"""', i + 3)
+            end = n if end == -1 else end + 3
+            out.append('"' + _blank(text[i + 1 : end - 1]) + '"')
+            i = end
         elif (
             language == "rust"
             and ch in "rb"
-            and re.match(r"(?:br|r)#*\"", text[i:])
             and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))
+            and (raw := _RUST_RAW.match(text, i)) is not None
         ):
-            m = re.match(r"(?:br|r)(#*)\"", text[i:])
-            assert m is not None
-            closer = '"' + m.group(1)
-            end = text.find(closer, i + m.end())
+            closer = '"' + raw.group(1)
+            end = text.find(closer, raw.end())
             end = n if end == -1 else end + len(closer)
             out.append(_blank(text[i:end]))
             i = end
@@ -305,23 +368,25 @@ def strip_c_like(text: str, language: str) -> str:
             while j < n and text[j] != ch:
                 if text[j] == "\\" and (ch == '"' or language != "go"):
                     j += 1
-                elif text[j] == "\n" and ch == '"':
+                elif text[j] == "\n" and ch == '"' and language != "rust":
                     break
                 j += 1
-            out.append(ch + _blank(text[i + 1 : j]) + (ch if j < n and text[j] == ch else ""))
-            i = j + 1 if j < n and text[j] == ch else j
+            closed = j < n and text[j] == ch
+            out.append(ch + _blank(text[i + 1 : j]) + (ch if closed else ""))
+            i = j + 1 if closed else j
         elif ch == "'":
-            if language in ("javascript", "typescript"):
+            if js:
                 j = i + 1
                 while j < n and text[j] not in "'\n":
                     j += 2 if text[j] == "\\" else 1
-                out.append("'" + _blank(text[i + 1 : j]) + ("'" if j < n and text[j] == "'" else ""))
-                i = j + 1 if j < n and text[j] == "'" else j
+                closed = j < n and text[j] == "'"
+                out.append("'" + _blank(text[i + 1 : j]) + ("'" if closed else ""))
+                i = j + 1 if closed else j
             else:
-                m = re.match(r"'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^\\'\n])'", text[i:])
+                m = _CHAR_LIT.match(text, i)
                 if m:
-                    out.append("'" + " " * (m.end() - 2) + "'")
-                    i += m.end()
+                    out.append("'" + " " * (m.end() - i - 2) + "'")
+                    i = m.end()
                 else:  # Rust lifetime / label
                     out.append(ch)
                     i += 1
@@ -347,7 +412,9 @@ def strip_shell(text: str) -> str:
                 pending.pop(0)
             continue
         for m in _HEREDOC.finditer(line):
-            if line[max(0, m.start() - 1) : m.start()] != "<":
+            before = line[: m.start()]
+            in_arith = before.count("((") > before.count("))") or bool(re.search(r"\blet\b|\[\[", before))
+            if not before.endswith("<") and not in_arith:
                 pending.append((m.group(3), m.group(1) == "-"))
     out: list[str] = []
     joined = "\n".join(lines)
@@ -396,27 +463,32 @@ def _line_of(text: str) -> Any:
     return line_of
 
 
+def _is_arrow(text: str, j: int) -> bool:
+    return text[j] == ">" and j > 0 and text[j - 1] in "-="
+
+
 def _balanced(text: str, start: int, opener: str = "(", closer: str = ")") -> tuple[str, int]:
     """Return (inner, end_index_after_closer) for a group starting at ``text[start] == opener``."""
     depth = 0
     for j in range(start, len(text)):
         if text[j] == opener:
             depth += 1
-        elif text[j] == closer:
+        elif text[j] == closer and not _is_arrow(text, j):
             depth -= 1
             if depth == 0:
                 return text[start + 1 : j], j + 1
     return text[start + 1 :], len(text)
 
 
-def _split_top(text: str, sep: str = ",") -> list[str]:
+def _split_top(text: str, sep: str = ",", angles: bool = True) -> list[str]:
     parts: list[str] = []
     buf: list[str] = []
     depth = 0
-    for ch in text:
-        if ch in "([{<":
+    openers, closers = ("([{<", ")]}>") if angles else ("([{", ")]}")
+    for j, ch in enumerate(text):
+        if ch in openers and not (ch == "<" and text[j + 1 : j + 2] == "-"):
             depth += 1
-        elif ch in ")]}>":
+        elif ch in closers and not _is_arrow(text, j):
             depth = max(0, depth - 1)
         if ch == sep and depth == 0:
             parts.append("".join(buf))
@@ -660,12 +732,35 @@ def extract_python(ctx: Context) -> tuple[list[Identifier], list[str]]:
 
 # -- Go --
 
-_GO_FUNC = re.compile(r"^func\s*(\([^)]*\)\s*)?(\w+)\s*(?:\[[^\]]*\]\s*)?\(", re.MULTILINE)
-_GO_SHORT = re.compile(r"(?<![\w.])((?:\w+\s*,\s*)*\w+)\s*:=")
+_GO_FUNC = re.compile(r"^func\s*(\([^)]*\)\s*)?(\w+)\s*", re.MULTILINE)
+
+
+def _go_short_decl_names(text: str, colon: int) -> tuple[list[str], int] | None:
+    """Names on the left of the ':=' at ``colon``, scanning backwards in linear time."""
+    names: list[str] = []
+    j = colon
+    while True:
+        while j > 0 and text[j - 1] in " \t":
+            j -= 1
+        end = j
+        while j > 0 and (text[j - 1].isalnum() or text[j - 1] == "_"):
+            j -= 1
+        if j == end:
+            return None
+        names.append(text[j:end])
+        k = j
+        while k > 0 and text[k - 1] in " \t":
+            k -= 1
+        if k > 0 and text[k - 1] == ",":
+            j = k - 1
+            continue
+        if k > 0 and text[k - 1] == ".":
+            return None
+        return names[::-1], j
 
 
 def _go_params(inner: str) -> list[tuple[str, str]]:
-    parts = [p.split(None, 1) for p in _split_top(inner)]
+    parts = [p.split(None, 1) for p in _split_top(inner, angles=False)]
     if not any(len(p) == 2 for p in parts):
         return []
     result: list[tuple[str, str]] = []
@@ -691,26 +786,41 @@ def extract_go(ctx: Context) -> tuple[list[Identifier], list[str]]:
         out.append(Identifier(m.group(1), "package", line_of(m.start(1)), top_level=True))
 
     for m in _GO_FUNC.finditer(text):
+        pos = m.end()
+        if text[pos : pos + 1] == "[":  # type parameters
+            _, pos = _balanced(text, pos, "[", "]")
+            while pos < len(text) and text[pos] in " \t":
+                pos += 1
+        if text[pos : pos + 1] != "(":
+            continue
         kind = "method" if m.group(1) else "function"
         line = line_of(m.start(2))
         out.append(Identifier(m.group(2), kind, line, top_level=True))
-        inner, _ = _balanced(text, m.end() - 1)
+        inner, _ = _balanced(text, pos)
         for name, typ in _go_params(inner):
             if name != "_":
                 out.append(Identifier(name, "parameter", line, is_bool=typ == "bool"))
 
-    for m in _GO_SHORT.finditer(text):
-        line_start = text.rfind("\n", 0, m.start()) + 1
-        prefix = text[line_start : m.start()]
-        rhs = text[m.end() : m.end() + 12].lstrip()
-        is_loop = bool(re.fullmatch(r"\s*for\s+", prefix))
-        for name in re.split(r"\s*,\s*", m.group(1)):
+    colon = text.find(":=")
+    while colon != -1:
+        found = _go_short_decl_names(text, colon)
+        rhs = text[colon + 2 : colon + 14].lstrip()
+        next_colon = text.find(":=", colon + 2)
+        if found is None:
+            colon = next_colon
+            continue
+        decl_names, start = found
+        line_start = text.rfind("\n", 0, start) + 1
+        is_loop = bool(re.fullmatch(r"\s*for\s+", text[line_start:start]))
+        line_no = line_of(start)
+        colon = next_colon
+        for name in decl_names:
             if name != "_":
                 out.append(
                     Identifier(
                         name,
                         "variable",
-                        line_of(m.start()),
+                        line_no,
                         is_loop=is_loop,
                         is_bool=bool(re.match(r"(true|false)\b", rhs)),
                     )
@@ -718,6 +828,7 @@ def extract_go(ctx: Context) -> tuple[list[Identifier], list[str]]:
 
     lines = text.split("\n")
     block: str | None = None
+    block_depth = 0
     body_depth: int | None = None
     body_kind = ""
     depth = 0
@@ -735,9 +846,9 @@ def extract_go(ctx: Context) -> tuple[list[Identifier], list[str]]:
                 if fm:
                     out.append(Identifier(fm.group(1), "method", lineno))
         elif block is not None:
-            if s.startswith(")"):
+            if s.startswith(")") and depth == block_depth:
                 block = None
-            elif s:
+            elif s and depth == block_depth:
                 if block == "type":
                     bm = re.match(r"^(\w+)\s", s)
                     if bm:
@@ -762,6 +873,7 @@ def extract_go(ctx: Context) -> tuple[list[Identifier], list[str]]:
             dm = re.match(r"^(var|const|type)\s*\(\s*$", s)
             if dm and top:
                 block = dm.group(1)
+                block_depth = depth
             else:
                 vm = re.match(r"^(var|const)\s+((?:\w+\s*,\s*)*\w+)(.*)$", s)
                 if vm:
@@ -876,6 +988,27 @@ JS_KEYWORDS = frozenset(
 _JS_ARROW = re.compile(r"^(?:async\s+)?(?:\(([^()]*)\)|([A-Za-z_$][\w$]*))\s*(?::\s*[^=]+?)?\s*=>")
 
 
+_JS_DECLARATOR = re.compile(
+    r"^([A-Za-z_$][\w$]*)\s*!?\s*(?::\s*([^=]+?))?\s*(?:=(?!=)\s*(.*))?(?:\s+(?:of|in)\b.*)?$", re.DOTALL
+)
+
+
+def _js_statement(text: str, pos: int) -> str:
+    """Text of a declaration list from ``pos`` to its ';' (or newline) at bracket depth 0."""
+    depth = 0
+    for j in range(pos, len(text)):
+        ch = text[j]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return text[pos:j]
+            depth -= 1
+        elif ch in ";\n" and depth == 0:
+            return text[pos:j]
+    return text[pos:]
+
+
 def _js_params(inner: str) -> list[tuple[str, bool]]:
     result = []
     for part in _split_top(inner):
@@ -922,34 +1055,39 @@ def extract_js(ctx: Context) -> tuple[list[Identifier], list[str]]:
         for m in re.finditer(r"(?<![\w.$])type\s+([A-Za-z_$][\w$]*)\s*(?:<[^=]*>)?\s*=", text):
             out.append(Identifier(m.group(1), "type", line_of(m.start(1))))
 
-    for m in re.finditer(
-        r"\b(const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*([^=;]+?))?\s*(?:=(?!=)\s*([^;\n]*))?(?=[;\n=]|\s+(?:of|in)\b|$)",
-        text,
-    ):
+    for m in re.finditer(r"\b(const|let|var)\s+", text):
         line_start = text.rfind("\n", 0, m.start()) + 1
         is_loop = bool(re.search(r"\bfor\s*\(\s*$", text[line_start : m.start()]))
-        name, typ, rhs = m.group(2), (m.group(3) or "").strip(), (m.group(4) or "").strip()
-        line = line_of(m.start(2))
-        arrow = _JS_ARROW.match(rhs)
-        if arrow or re.match(r"(?:async\s+)?function\b", rhs):
-            out.append(Identifier(name, "function", line))
-            if arrow:
-                add_params(arrow.group(1) if arrow.group(1) is not None else arrow.group(2) or "", line, loop=True)
-            continue
-        is_bool = typ == "boolean" or bool(re.match(r"(true|false)\b|!", rhs))
-        out.append(
-            Identifier(
-                name,
-                "variable",
-                line,
-                is_bool=is_bool,
-                is_loop=is_loop,
-                meta={
-                    "const": m.group(1) == "const",
-                    "import": bool(re.match(r"(?:await\s+)?(?:require|import)\s*\(", rhs)),
-                },
+        statement = _js_statement(text, m.end())
+        offset = m.end()
+        for part in _split_top(statement):
+            dm = _JS_DECLARATOR.match(part)
+            if dm is None:
+                continue
+            name, typ, rhs = dm.group(1), (dm.group(2) or "").strip(), (dm.group(3) or "").strip()
+            found_at = text.find(name, offset)
+            line = line_of(found_at if found_at != -1 else m.end())
+            offset = found_at + len(name) if found_at != -1 else offset
+            arrow = _JS_ARROW.match(rhs)
+            if arrow or re.match(r"(?:async\s+)?function\b", rhs):
+                out.append(Identifier(name, "function", line))
+                if arrow:
+                    add_params(arrow.group(1) if arrow.group(1) is not None else arrow.group(2) or "", line, loop=True)
+                continue
+            is_bool = typ == "boolean" or bool(re.match(r"(true|false)\b|!", rhs))
+            out.append(
+                Identifier(
+                    name,
+                    "variable",
+                    line,
+                    is_bool=is_bool,
+                    is_loop=is_loop,
+                    meta={
+                        "const": m.group(1) == "const",
+                        "import": bool(re.match(r"(?:await\s+)?(?:require|import)\s*\(", rhs)),
+                    },
+                )
             )
-        )
 
     method = re.compile(
         r"^[ \t]*(?:(?:public|private|protected|static|async|readonly|override|abstract|get|set)\s+)*\*?\s*"
@@ -989,6 +1127,7 @@ def extract_java(ctx: Context) -> tuple[list[Identifier], list[str]]:
     depths = _depths(text)
     out: list[Identifier] = []
     type_stack: list[tuple[str, int]] = []
+    pending_type: str | None = None
     method = re.compile(
         r"^\s*(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\s+)*"
         r"(?:<[^>]+>\s+)?(?:([\w<>\[\],.?]+(?:\s*<[^()]*>)?)\s+)?(\w+)\s*\(([^()]*)\)\s*(?:throws\s+[\w.,\s]+)?[{;]"
@@ -1001,6 +1140,10 @@ def extract_java(ctx: Context) -> tuple[list[Identifier], list[str]]:
         depth = depths[lineno]
         while type_stack and depth < type_stack[-1][1]:
             type_stack.pop()
+        if pending_type is not None and line.strip().startswith("{"):
+            type_stack.append((pending_type, depth + 1))
+            pending_type = None
+            continue
         pm = re.match(r"^\s*package\s+([\w.]+)\s*;", line)
         if pm:
             out.append(Identifier(pm.group(1), "package", lineno, top_level=True))
@@ -1012,6 +1155,8 @@ def extract_java(ctx: Context) -> tuple[list[Identifier], list[str]]:
             out.append(Identifier(tm.group(2), kind, lineno, top_level=depth == 0, meta={"public": public}))
             if "{" in line[tm.end() :]:
                 type_stack.append((tm.group(2), depth + 1))
+            else:
+                pending_type = tm.group(2)  # Allman style: brace on a later line
             continue
         for fm in re.finditer(r"\bfor\s*\(\s*(?:final\s+)?[\w<>\[\],.?]+\s+(\w+)\s*[:=]", line):
             out.append(Identifier(fm.group(1), "variable", lineno, is_loop=True))
@@ -1053,6 +1198,37 @@ def extract_java(ctx: Context) -> tuple[list[Identifier], list[str]]:
 # -- Shell --
 
 
+def _shell_decl_names(rest: str) -> list[str]:
+    """Names in ``a=1 b c="x y" d=$(cmd arg)``; stops at a command separator."""
+    names: list[str] = []
+    i, n = 0, len(rest)
+    while i < n:
+        while i < n and rest[i] in " \t":
+            i += 1
+        if i >= n or rest[i] in ";&|#":
+            break
+        m = re.match(r"[A-Za-z_]\w*", rest[i:])
+        if m is None:
+            break
+        names.append(m.group(0))
+        i += m.end()
+        if i < n and rest[i] == "[":
+            i = rest.find("]", i) + 1 or n
+        if i < n and rest[i] == "=":
+            i += 1
+            while i < n and rest[i] not in " \t;&|":
+                if rest[i] in "\"'":
+                    close = rest.find(rest[i], i + 1)
+                    i = n if close == -1 else close + 1
+                elif rest.startswith("$(", i):
+                    _, i = _balanced(rest, i + 1)
+                else:
+                    i += 1
+        elif i < n and rest[i] not in " \t;&|":
+            break
+    return names
+
+
 def extract_shell(ctx: Context) -> tuple[list[Identifier], list[str]]:
     text = strip_shell(ctx.text)
     out: list[Identifier] = []
@@ -1079,14 +1255,17 @@ def extract_shell(ctx: Context) -> tuple[list[Identifier], list[str]]:
             keyword, flags = dm.group(1), dm.group(2)
             if "-f" in flags or "-F" in flags:
                 pass
-            elif keyword == "local" or (
-                keyword in ("declare", "typeset") and in_function and not re.search(r"-\w*[rx]", flags)
-            ):
-                out.append(Identifier(dm.group(3), "variable", lineno, meta={"local": True}))
-            elif keyword in ("readonly", "export") or re.search(r"-\w*[rx]", flags):
-                out.append(Identifier(dm.group(3), "constant", lineno, meta={"keyword": keyword}))
             else:
-                out.append(Identifier(dm.group(3), "variable", lineno))
+                names = _shell_decl_names(line[dm.start(3) :])
+                for name in names:
+                    if keyword == "local" or (
+                        keyword in ("declare", "typeset") and in_function and not re.search(r"-\w*[rx]", flags)
+                    ):
+                        out.append(Identifier(name, "variable", lineno, meta={"local": True}))
+                    elif keyword in ("readonly", "export") or re.search(r"-\w*[rx]", flags):
+                        out.append(Identifier(name, "constant", lineno, meta={"keyword": keyword}))
+                    else:
+                        out.append(Identifier(name, "variable", lineno))
         else:
             am = assign.match(line)
             if am:
@@ -1368,6 +1547,8 @@ def _rule_single(ident: Identifier, ctx: Context) -> list[Finding]:
     core = _core(ident.name)
     if len(core) != 1 or ident.is_loop or ident.kind in ("typevar", "package"):
         return []
+    if ident.inferred:  # module-level literal: a global, so the loop/coordinate idioms do not apply
+        return [_finding(ident, ctx, "N002", "minor", "Single-letter module-level name; say what it holds")]
     local = ident.kind in ("parameter", "variable")
     allowed = core.lower() in SINGLE_LETTER_OK.get(ctx.language, frozenset())
     if allowed and (local or (ident.kind == "field" and core.lower() in "xyz")):
@@ -1379,24 +1560,32 @@ def _rule_single(ident: Identifier, ctx: Context) -> list[Finding]:
     return [_finding(ident, ctx, "N002", "major", f"Single-letter {ident.kind} name is unsearchable and opaque")]
 
 
+EMPTY_WORDS = frozenset("foo bar baz qux stuff thing things junk blah whatever dummy misc".split())
+_VAGUE_MAJOR_KINDS = {"function", "class", "type", "trait", "interface", "enum"}
+
+
 def _rule_vague(ident: Identifier, ctx: Context) -> list[Finding]:
+    """N003. Kinds whose context supplies meaning (variants, constants, modules) are skipped."""
     base = re.sub(r"\d+$", "", _core(ident.name)).lower().replace("_", "").replace("-", "")
-    if not base:
+    kind = ident.kind
+    if not base or kind in ("variant", "constant", "module", "macro", "package", "typevar"):
         return []
-    if ident.kind in _PASCAL_KINDS:
+    if kind in _PASCAL_KINDS:
         vocabulary = VAGUE_TYPES
-    elif ident.kind == "function":
+    elif kind == "function":
         vocabulary = VAGUE_FUNCTIONS
+    elif kind in ("method", "property"):
+        vocabulary = EMPTY_WORDS  # a receiver or owning type supplies the meaning
     else:
         vocabulary = VAGUE_COMMON
     if base not in vocabulary:
         return []
-    if (ctx.is_test_file and base in TEST_PLACEHOLDERS) or ident.kind == "parameter":
+    if (ctx.is_test_file and base in TEST_PLACEHOLDERS) or kind == "parameter":
         severity = "info"
-    elif ident.kind in ("variable", "field") or ident.is_loop:
-        severity = "minor"
-    else:
+    elif kind in _VAGUE_MAJOR_KINDS:
         severity = "major"
+    else:
+        severity = "minor"
     return [
         _finding(
             ident, ctx, "N003", severity, f"'{ident.name}' says nothing about the domain; name what it holds or does"
@@ -1495,6 +1684,8 @@ def _rule_negated(ident: Identifier, ctx: Context) -> list[Finding]:
         if not ident.is_bool:
             return []
         positive = ["is", *words[1:]]
+    elif lower[1:3] == ["no", "op"]:
+        return []
     elif lower[0] in ("is", "has", "can", "should", "was", "were", "does", "did", "will") and lower[1] in (
         "not",
         "no",
@@ -1522,15 +1713,9 @@ def _rule_negated(ident: Identifier, ctx: Context) -> list[Finding]:
 
 def _rule_acronym(ident: Identifier, ctx: Context, case_fired: bool) -> list[Finding]:
     if ctx.language == "go" and not case_fired and ident.kind != "package" and not _is_test_function(ident, ctx):
-        core = _core(ident.name)
-        words = split_words(core)
-        exported = core[:1].isupper()
-        fixed_words = [
-            w.upper() if _is_initialism(w) and w != w.upper() and (i > 0 or exported) else w
-            for i, w in enumerate(words)
-        ]
-        fixed = "".join(fixed_words)
-        if fixed != "".join(words):
+        words = "".join(split_words(_core(ident.name)))
+        fixed = go_fix_initialisms(ident.name)
+        if fixed != words:
             return [
                 _finding(
                     ident, ctx, "N008", "minor", "Go initialisms keep a consistent case (ID, URL, HTTP, JSON)", fixed
@@ -1562,6 +1747,7 @@ def _rule_stutter(ident: Identifier, ctx: Context) -> list[Finding]:
     rest = name[len(pkg) :]
     if not rest[:1].isupper():
         return []
+    rest = go_fix_initialisms(rest)
     return [_finding(ident, ctx, "N009", "minor", f"Callers write {pkg}.{name}; drop the repeated package name", rest)]
 
 
@@ -1715,16 +1901,17 @@ def _is_test_path(path: str, language: str) -> bool:
     return False
 
 
-def scan_source(text: str, language: str, path: str = "<stdin>") -> ScanResult:
+def scan_source(text: str, language: str, path: str = "<stdin>", rel: str | None = None) -> ScanResult:
     """Extract identifiers from ``text`` and check them. Never raises on bad input."""
     language = LANG_ALIASES.get(language, language)
+    text = text.removeprefix("\ufeff")
     if language not in EXTRACTORS:
         raise ValueError(f"unsupported language {language!r}")
     ctx = Context(
         language=language,
         path=path,
         text=text,
-        is_test_file=_is_test_path(path, language),
+        is_test_file=_is_test_path(rel if rel is not None else path, language),
         jsx=path.endswith((".jsx", ".tsx")),
     )
     result = ScanResult(path=path, language=language)
@@ -1788,7 +1975,7 @@ def _git_files(directory: Path) -> list[str] | None:
             capture_output=True,
             text=True,
             check=False,
-            timeout=30,
+            timeout=10,
         )
         if inside.returncode != 0 or inside.stdout.strip() != "true":
             return None
@@ -1797,7 +1984,7 @@ def _git_files(directory: Path) -> list[str] | None:
             capture_output=True,
             text=True,
             check=False,
-            timeout=120,
+            timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -1815,8 +2002,11 @@ def _walk(directory: Path) -> list[str]:
     return files
 
 
-def discover(paths: Sequence[str], excludes: Sequence[str]) -> Iterator[tuple[Path, str]]:
-    """Yield (filesystem path, display path) for candidate files."""
+GIT_SKIP_DIRS = frozenset({"node_modules", "vendor"})
+
+
+def discover(paths: Sequence[str], excludes: Sequence[str]) -> Iterator[tuple[Path, str, str]]:
+    """Yield (filesystem path, display path, path relative to the scan root) for candidate files."""
 
     def excluded(rel: str, display: str) -> bool:
         return any(
@@ -1828,20 +2018,21 @@ def discover(paths: Sequence[str], excludes: Sequence[str]) -> Iterator[tuple[Pa
         base = Path(arg)
         if base.is_file():
             if not excluded(base.name, arg):
-                yield base, arg
+                yield base, arg, base.name
             continue
         if not base.is_dir():
             print(f"naming-scan: no such file or directory: {arg}", file=sys.stderr)
             continue
         rels = _git_files(base)
+        skip = GIT_SKIP_DIRS
         if rels is None:
-            rels = _walk(base)
+            rels, skip = _walk(base), SKIP_DIRS
         for rel in sorted(rels):
-            if set(Path(rel).parts[:-1]) & SKIP_DIRS:
+            if set(Path(rel).parts[:-1]) & skip:
                 continue
             display = str(base / rel) if arg not in (".", "./") else rel
             if not excluded(rel, display):
-                yield base / rel, display
+                yield base / rel, display, rel
 
 
 def _summary(results: Sequence[ScanResult], findings: Sequence[Finding], truncated: bool) -> dict[str, Any]:
@@ -1875,9 +2066,10 @@ def _format_text(report: dict[str, Any]) -> str:
         lines.append(f"{err['path']}: error: {err['message']}")
     s = report["summary"]
     sev = ", ".join(f"{k}={v}" for k, v in sorted(s["by_severity"].items(), key=lambda kv: -SEV_RANK[kv[0]]))
+    severity_note = f" ({sev})" if sev else ""
+    shown = f" [showing {s['reported']}]" if s["truncated"] else ""
     lines.append(
-        f"-- {s['files_scanned']} files, {s['identifiers']} identifiers, {s['findings']} findings"
-        f"{' (' + sev + ')' if sev else ''}{' [truncated]' if s['truncated'] else ''}"
+        f"-- {s['files_scanned']} files, {s['identifiers']} identifiers, {s['findings']} findings{severity_note}{shown}"
     )
     return "\n".join(lines)
 
@@ -1886,9 +2078,9 @@ def _rules_table() -> str:
     rows = ["ID    name                  default   description"]
     defaults = {
         "N001": "minor",
-        "N002": "minor+",
-        "N003": "major",
-        "N004": "minor",
+        "N002": "info-major",
+        "N003": "info-major",
+        "N004": "info",
         "N005": "minor",
         "N006": "info",
         "N007": "minor",
@@ -1937,9 +2129,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not forced:
             print("naming-scan: --lang is required when reading stdin", file=sys.stderr)
             return 2
-        results.append(scan_source(sys.stdin.read(), forced, "<stdin>"))
+        results.append(scan_source(sys.stdin.buffer.read().decode("utf-8-sig", "replace"), forced, "<stdin>"))
     else:
-        for fs_path, display in discover(args.paths, args.exclude):
+        missing = [p for p in args.paths if p != "-" and not Path(p).exists()]
+        if missing:
+            print(f"naming-scan: no such file or directory: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        for fs_path, display, rel in discover(args.paths, args.exclude):
             explicit = display in args.paths
             language = forced if (forced and explicit) else detect_language(fs_path)
             if language is None or fs_path.name.endswith((".min.js", ".d.ts", ".d.mts", ".d.cts")):
@@ -1948,13 +2144,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if fs_path.stat().st_size > MAX_FILE_BYTES:
                     print(f"naming-scan: skipping large file {display}", file=sys.stderr)
                     continue
-                text = fs_path.read_text(encoding="utf-8")
+                text = fs_path.read_text(encoding="utf-8-sig")
             except (OSError, UnicodeDecodeError) as exc:
                 print(f"naming-scan: skipping {display}: {exc}", file=sys.stderr)
                 continue
             if _is_generated(text) or (language in ("javascript", "typescript") and _is_bundled(text)):
                 continue
-            results.append(scan_source(text, language, display))
+            results.append(scan_source(text, language, display, rel))
 
     totals: Counter[str] = Counter()
     for res in results:
@@ -1965,11 +2161,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     fail = args.fail_on is not None and any(SEV_RANK[f.severity] >= SEV_RANK[args.fail_on] for f in findings)
     findings = [f for f in findings if SEV_RANK[f.severity] >= SEV_RANK[args.min_severity]]
     findings.sort(key=lambda f: (-SEV_RANK[f.severity], f.path, f.line, f.rule))
-    truncated = len(findings) > args.max_findings
+    summary = _summary(results, findings, truncated=len(findings) > args.max_findings)
     findings = findings[: args.max_findings]
+    summary["reported"] = len(findings)
     report = {
         "version": VERSION,
-        "summary": _summary(results, findings, truncated),
+        "summary": summary,
         "findings": [asdict(f) for f in findings],
         "errors": [{"path": r.path, "message": e} for r in results for e in r.errors],
     }

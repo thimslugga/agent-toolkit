@@ -389,7 +389,7 @@
     },
     {
       "name": "naming-analyzer",
-      "description": "Suggest better variable, function, and class names based on context and conventions.",
+      "description": "Review and fix identifier names across Python, Go, Rust, JS/TS, Java and shell: a stdlib-only convention scanner plus agent review of misleading names and safe rename plans.",
       "source": "./dist/plugins/naming-analyzer",
       "strict": false,
       "skills": [
@@ -400,7 +400,9 @@
         "development",
         "naming",
         "refactoring",
-        "code-quality"
+        "code-quality",
+        "linting",
+        "conventions"
       ]
     },
     {

@@ -31,14 +31,21 @@ naming-scan.py [PATH ...] [--format json|text] [--lang LANG]
 
 - `PATH` is a file or directory; `-` reads stdin and requires `--lang`.
   No paths means `.`.
-- Directories inside a git work tree use `git ls-files -co --exclude-standard`;
-  otherwise a walk that skips `.git node_modules vendor target dist build
-  .venv venv __pycache__ .tox .mypy_cache .ruff_cache .pytest_cache`.
+- Directories inside a git work tree use `git ls-files -co --exclude-standard`
+  and prune only `node_modules` and `vendor` (tracked `build/` or `dist/`
+  packages are real code); otherwise a walk that skips `.git node_modules
+  vendor target dist build .venv venv __pycache__ .tox .mypy_cache
+  .ruff_cache .pytest_cache .next`.
 - Skipped: files over 1 MiB, `*.min.js`, files marked generated
   (`Code generated ... DO NOT EDIT.` or `@generated` in the first 5 lines).
 - Language by extension, then shebang for extensionless files.
 - JSON goes to stdout; progress and warnings go to stderr.
-- Exit codes: `0` ok, `1` a finding at or above `--fail-on`, `2` usage error.
+- Exit codes: `0` ok, `1` a finding at or above `--fail-on`, `2` usage error
+  (including a path that does not exist).
+- Input is decoded as UTF-8 with an optional BOM; undecodable stdin bytes are
+  replaced, undecodable files are skipped with a warning.
+- Test-file detection (`tests/`, `test_*.py`, `*_test.go`, `*.spec.ts`...)
+  looks only at the path *below* the scan root.
 
 ### JSON shape
 
@@ -51,7 +58,7 @@ naming-scan.py [PATH ...] [--format json|text] [--lang LANG]
     "by_rule": {"N001": 4},
     "languages": {"python": 2, "go": 1},
     "style_profile": {"python": {"function": {"snake": 40, "camel": 2}}},
-    "truncated": false
+    "truncated": false, "reported": 9
   },
   "findings": [{
     "path": "app/user.py", "line": 12, "language": "python",
@@ -63,8 +70,10 @@ naming-scan.py [PATH ...] [--format json|text] [--lang LANG]
 }
 ```
 
-`occurrences` counts whole-word uses of the name across every scanned file,
-which sizes the rename.
+Summary counts cover every finding at or above `--min-severity`;
+`reported` is how many are in `findings` after `--max-findings`.
+`occurrences` counts whole-word uses of the name across every scanned file
+and language — an upper bound on the rename size.
 
 ## Severities
 
@@ -72,22 +81,28 @@ which sizes the rename.
 
 ## Rules
 
-| ID | Name | Default severity | Notes |
+| ID | Name | Severity | Notes |
 |---|---|---|---|
-| N001 | case-style | minor (info for inferred constants) | Suggestion is the converted name |
-| N002 | single-letter | minor (param/variable), major (other kinds) | Loop and lambda vars exempt; per-language allowlist |
-| N003 | vague-name | major (minor for params; info in tests for foo/bar) | Checked on the name with trailing digits removed |
-| N004 | numbered-suffix | minor | `user2`; technical tokens (`sha256`, `ec2`, `ipv6`) exempt; skipped when N003 fires |
-| N005 | hungarian | minor | `strName`, `m_count`, `iCount`; TS `IUser` interface is info |
-| N006 | boolean-prefix | info | Only when the type is known bool |
-| N007 | negated-boolean | minor | `isNotValid`, `has_no_items`, `notReady` |
-| N008 | acronym-casing | minor | Go: `UserId`→`UserID`; Rust: `HTTPServer`→`HttpServer` |
+| N001 | case-style | minor; info for inferred Python constants and shell UPPER locals | Suggestion is the converted name; single letters and non-ASCII names skipped |
+| N002 | single-letter | major (functions, types, constants); minor (locals, fields); info (Go locals, test files) | Loop/lambda vars and per-language idioms exempt (`i j k n x y z`; Python `f m e`; Go `t b w r f`) |
+| N003 | vague-name | major (functions, types); minor (locals, fields); info (params, test placeholders) | Methods take meaning from the receiver: only empty words (`foo`, `stuff`) apply |
+| N004 | numbered-suffix | info | `user2`; technical tokens (`sha256`, `ec2`, `ipv6`) exempt; skipped when N003 fires |
+| N005 | hungarian | minor; info for TS/Java `IUser` | Type prefixes (`str`, `arr`, `obj`, `sz`, `b`) and scope prefixes (`m_`, `g_`); `n`-for-count is not Hungarian |
+| N006 | boolean-prefix | info | Only when the type is known bool; predicates, adjectives, past tense, option-flag verbs accepted |
+| N007 | negated-boolean | minor | `isNotValid`, `has_no_items`; bare `not…` only for known booleans |
+| N008 | acronym-casing | minor | Go: re-cases only real initialisms (`UserId`→`UserID`); Rust: `HTTPServer`→`HttpServer` |
 | N009 | package-stutter | minor | Go: `package user; type UserService` → `Service` |
 | N010 | shadows-builtin | minor | Python builtins, Go predeclared identifiers |
-| N011 | too-long | info | > 40 chars or > 6 words; test functions exempt |
-| N012 | unclear-abbreviation | minor | Conservative dictionary with expansions |
-| N013 | exception-suffix | info | Python exception classes end in Error/Exception/Warning |
-| N014 | file-name | minor | Python modules (non-scripts), Go, Rust: snake/lower; Java: matches public class |
+| N011 | too-long | info | > 40 chars or > 6 words; test functions and test files exempt |
+| N012 | unclear-abbreviation | minor | Conservative dictionary; ambiguous forms (`rec`, `proc`, `col`, `txt`) excluded |
+| N013 | exception-suffix | info | Python exception classes end in Error/Exception/Warning/Exit/Interrupt |
+| N014 | file-name | minor; major for Java (compile error) | Python modules (non-scripts), Go (uppercase), Rust: snake; Java: matches public type |
+
+Also skipped entirely: `.d.ts` declaration files and bundled JS/TS (any of
+the first 20 lines longer than 1000 characters).
+
+Every false positive found while calibrating against the Go and Python
+standard libraries is pinned in `tests/test_regressions.py`.
 
 ## Per-language conventions (N001)
 
@@ -97,7 +112,7 @@ which sizes the rename.
 | Go | MixedCaps | MixedCaps | MixedCaps | MixedCaps (not UPPER_SNAKE) | package: lower, no `_`; `TestX_y` funcs exempt |
 | Rust | snake | snake | Pascal (variants too) | SCREAMING_SNAKE (`const`, `static`) | module: snake |
 | JS / TS | camel (Pascal in .jsx/.tsx) | camel; `const` may be UPPER_SNAKE | Pascal | — | leading `_`, `#`, `$` allowed |
-| Java | camel | camel | Pascal | UPPER_SNAKE (`static final`) | package: lower |
+| Java | camel | camel | Pascal | UPPER_SNAKE (`static final` *immutable* types only) | package: lower; other `static final`: camel or UPPER |
 | Shell | lower_snake (`::` allowed) | lower_snake or UPPER_SNAKE; `local` lower | — | `readonly`/`export`/`declare -r`/`-x`: UPPER_SNAKE | hyphenated function names are not POSIX |
 
 Leading/trailing underscores are stripped before classification. Python

@@ -119,7 +119,7 @@ Add skills to project knowledge or paste SKILL.md contents into the conversation
 | 🎨 Design & Frontend | [react-useeffect](skills/react-useeffect/README.md) | React useEffect best practices |
 | 🛠️ Development | [database-schema-designer](skills/database-schema-designer/README.md) | Design robust database schemas |
 | 🛠️ Development | [dependency-updater](skills/dependency-updater/README.md) | Smart dependency management |
-| 🛠️ Development | [naming-analyzer](skills/naming-analyzer/README.md) | Suggest better variable/function names |
+| 🛠️ Development | [naming-analyzer](skills/naming-analyzer/README.md) | Naming review for 7 languages: convention scanner + misleading-name checks |
 | 🛠️ Development | [lesson-learned](skills/lesson-learned/README.md) | Extract SE lessons from recent code changes |
 | 🛠️ Development | [reducing-entropy](skills/reducing-entropy/README.md) | Minimize codebase size |
 | 🛠️ Development | [session-handoff](skills/session-handoff/README.md) | Seamless AI session transfers |

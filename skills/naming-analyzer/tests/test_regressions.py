@@ -162,3 +162,8 @@ def test_java_mutable_static_finals_are_not_constants(scan: ScanFn) -> None:
     found = scan(code, "java", "Svc.java")
     assert not hits(found, "logger") and not hits(found, "mutableNames") and not hits(found, "LOG")
     assert hits(found, "maxSize", "N001")
+
+
+def test_stutter_suggestion_applies_initialisms(scan: ScanFn) -> None:
+    f = hits(scan("package user\n\ntype UserId string\n", "go"), "UserId", "N009")
+    assert f and f[0].suggestion == "ID"
